@@ -1,11 +1,10 @@
-package in.dragonbra.javasteamsamples._000_authentication;
+package in.dragonbra.javasteamsamples._014_steammatchmaking;
 
-import com.google.gson.Gson;
-import com.google.gson.GsonBuilder;
-import com.google.gson.JsonElement;
-import com.google.gson.JsonParser;
+import in.dragonbra.javasteam.enums.ELobbyComparison;
+import in.dragonbra.javasteam.enums.ELobbyDistanceFilter;
 import in.dragonbra.javasteam.enums.EResult;
 import in.dragonbra.javasteam.steam.authentication.*;
+import in.dragonbra.javasteam.steam.handlers.steammatchmaking.*;
 import in.dragonbra.javasteam.steam.handlers.steamuser.LogOnDetails;
 import in.dragonbra.javasteam.steam.handlers.steamuser.SteamUser;
 import in.dragonbra.javasteam.steam.handlers.steamuser.callback.LoggedOffCallback;
@@ -20,22 +19,25 @@ import in.dragonbra.javasteam.util.log.LogManager;
 import java.io.Closeable;
 import java.io.IOException;
 import java.util.ArrayList;
-import java.util.Base64;
 import java.util.List;
 import java.util.concurrent.CancellationException;
 
 /**
  * @author lossy
- * @since 2023-03-19
+ * @since 2025-05-21
  */
 @SuppressWarnings("FieldCanBeLocal")
-public class SampleLogonAuthentication implements Runnable {
+public class SampleSteamMatchmaking implements Runnable {
+
+    private final Integer appID = 480; // Team Fortress 2
 
     private SteamClient steamClient;
 
     private CallbackManager manager;
 
     private SteamUser steamUser;
+
+    private SteamMatchmaking steamMatchmaking;
 
     private boolean isRunning;
 
@@ -45,9 +47,7 @@ public class SampleLogonAuthentication implements Runnable {
 
     private List<Closeable> subscriptions;
 
-    private String previouslyStoredGuardData; // For the sake of this sample, we do not persist guard data
-
-    public SampleLogonAuthentication(String user, String pass) {
+    public SampleSteamMatchmaking(String user, String pass) {
         this.user = user;
         this.pass = pass;
     }
@@ -60,37 +60,11 @@ public class SampleLogonAuthentication implements Runnable {
 
         LogManager.addListener(new DefaultLogListener());
 
-        new SampleLogonAuthentication(args[0], args[1]).run();
+        new SampleSteamMatchmaking(args[0], args[1]).run();
     }
 
     @Override
     public void run() {
-
-        // If any configuration needs to be set; such as connection protocol api key, etc., you can configure it like so.
-        // var config = SteamConfiguration.create(config -> {
-        //    config.withProtocolTypes(ProtocolTypes.WEB_SOCKET);
-        // });
-
-        // You can also create custom connection classes if you have specific networking requirements.
-        // var config = SteamConfiguration.create(builder -> {
-        //     builder.withProtocolTypes(EnumSet.of(ProtocolTypes.TCP, ProtocolTypes.UDP)); // Declare desired protocol types.
-        //     IConnectionFactory connectionFactory = (configuration, protocol) -> {
-        //         if (protocol.contains(ProtocolTypes.TCP)) {
-        //             return new CustomTCPConnection();
-        //         } else if (protocol.contains(ProtocolTypes.UDP)) {
-        //             // We ask for TCP and UDP above, so this condition should handle UDP.
-        //             return CustomUDPConnection();
-        //         } else {
-        //             // Fallback: 'thenResolve` will fallback to default connection types.
-        //             return null;
-        //         }
-        //     };
-        //     builder.withConnectionFactory(connectionFactory.thenResolve(IConnectionFactory.DEFAULT));
-        // });
-
-        // create our steamclient instance with custom configuration.
-        // steamClient = new SteamClient(config);
-
         // create our steamclient instance using default configuration
         steamClient = new SteamClient();
 
@@ -99,6 +73,9 @@ public class SampleLogonAuthentication implements Runnable {
 
         // get the steamuser handler, which is used for logging on after successfully connecting
         steamUser = steamClient.getHandler(SteamUser.class);
+
+        // get the steammatchmaking handler.
+        steamMatchmaking = steamClient.getHandler(SteamMatchmaking.class);
 
         // The callbacks are a closeable, and to properly fix
         // "'Closeable' used without 'try'-with-resources statement", they should be closed once done.
@@ -148,9 +125,6 @@ public class SampleLogonAuthentication implements Runnable {
         authDetails.password = pass;
         authDetails.persistentSession = shouldRememberPassword;
 
-        // See NewGuardData comment below.
-        authDetails.guardData = previouslyStoredGuardData;
-
         /**
          * {@link UserConsoleAuthenticator} is the default authenticator implementation provided by JavaSteam
          * for ease of use which blocks the thread and asks for user input to enter the code.
@@ -167,13 +141,6 @@ public class SampleLogonAuthentication implements Runnable {
             // Note: Kotlin uses should use ".pollingWaitForResult()" as its a suspending function.
             AuthPollResult pollResponse = authSession.pollingWaitForResult().get();
 
-            if (pollResponse.getNewGuardData() != null) {
-                // When using certain two factor methods (such as email 2fa), guard data may be provided by Steam
-                // for use in future authentication sessions to avoid triggering 2FA again (this works similarly to the old sentry file system).
-                // Do note that this guard data is also a JWT token and has an expiration date.
-                previouslyStoredGuardData = pollResponse.getNewGuardData();
-            }
-
             // Logon to Steam with the access token we have received
             // Note that we are using RefreshToken for logging on here
             LogOnDetails details = new LogOnDetails();
@@ -186,9 +153,6 @@ public class SampleLogonAuthentication implements Runnable {
 
             steamUser.logOn(details);
 
-            // This is not required, but it is possible to parse the JWT access token to see the scope and expiration date.
-            // parseJsonWebToken(pollResponse.accessToken, "AccessToken");
-            // parseJsonWebToken(pollResponse.refreshToken, "RefreshToken");
         } catch (Exception e) {
             // List a couple of exceptions that could be important to handle.
             if (e instanceof AuthenticationException) {
@@ -231,8 +195,48 @@ public class SampleLogonAuthentication implements Runnable {
 
         // at this point, we'd be able to perform actions on Steam
 
-        // for this sample we'll just log off
-        steamUser.logOff();
+        try {
+            var filters = List.of(
+                    new DistanceFilter(ELobbyDistanceFilter.Worldwide),
+                    new StringFilter("CONMETHOD", "P2P", ELobbyComparison.Equal)
+            );
+            var lobbyListCallback = steamMatchmaking.getLobbyList(appID, filters, 20).toFuture().get();
+
+            System.out.println("App ID: " + lobbyListCallback.getAppID());
+            System.out.println("Result: " + lobbyListCallback.getResult());
+            System.out.println("Lobby Size: " + lobbyListCallback.getLobbies().size());
+            lobbyListCallback.getLobbies().forEach(lobby -> {
+                System.out.println("\tsteamID: " + lobby.getSteamID().convertToUInt64());
+                System.out.println("\tlobbyType: " + lobby.getLobbyType());
+                System.out.println("\tlobbyFlags: " + lobby.getLobbyFlags());
+                System.out.println("\townerSteamID: " + lobby.getOwnerSteamID());
+
+                System.out.println("\tMetadata:");
+                lobby.getMetadata().forEach((k, v) -> System.out.println("\t\tkey: " + k + " value: " + v));
+
+                System.out.println("\tmaxMembers: " + lobby.getMaxMembers());
+                System.out.println("\tnumMembers: " + lobby.getNumMembers());
+
+                System.out.println("\tMembers:");
+                lobby.getMembers().forEach(member -> {
+                    System.out.println("\t\tsteamID: " + member.getSteamID().convertToUInt64());
+                    System.out.println("\t\tpersonaName: " + member.getPersonaName());
+                    System.out.println("\t\tMember Metadata:");
+                    member.getMetadata().forEach((k, v) ->
+                            System.out.println("\t\t\tkey: " + k + " value: " + v));
+                });
+
+                System.out.println("\tdistance: " + lobby.getDistance());
+                System.out.println("\tweight: " + lobby.getWeight());
+                System.out.println("\n");
+            });
+
+
+        } catch (Exception e) {
+            System.err.println(e.getMessage());
+        } finally {
+            steamUser.logOff();
+        }
     }
 
     private void onLoggedOff(LoggedOffCallback callback) {
@@ -240,29 +244,4 @@ public class SampleLogonAuthentication implements Runnable {
 
         isRunning = false;
     }
-
-
-    @SuppressWarnings("unused")
-    private void parseJsonWebToken(String token, String name) {
-        String[] tokenComponents = token.split("\\.");
-
-        // Fix up base64url to normal base64
-        String base64 = tokenComponents[1].replace('-', '+').replace('_', '/');
-
-        if (base64.length() % 4 != 0) {
-            base64 += new String(new char[4 - base64.length() % 4]).replace('\0', '=');
-        }
-
-        byte[] payloadBytes = Base64.getDecoder().decode(base64);
-
-        // Payload can be parsed as JSON, and then fields such expiration date, scope, etc can be accessed
-        Gson gson = new GsonBuilder().setPrettyPrinting().create();
-        JsonElement payload = JsonParser.parseString(new String(payloadBytes));
-        String formatted = gson.toJson(payload);
-
-        // For brevity, we will simply output formatted json to console
-        System.out.println(name + ": " + formatted);
-        System.out.println();
-    }
-
 }

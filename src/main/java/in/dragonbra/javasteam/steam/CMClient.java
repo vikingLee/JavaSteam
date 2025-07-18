@@ -9,8 +9,8 @@ import in.dragonbra.javasteam.generated.MsgClientServerUnavailable;
 import in.dragonbra.javasteam.networking.steam3.*;
 import in.dragonbra.javasteam.protobufs.steamclient.SteammessagesBase.CMsgMulti;
 import in.dragonbra.javasteam.protobufs.steamclient.SteammessagesClientserver.CMsgClientSessionToken;
-import in.dragonbra.javasteam.protobufs.steamclient.SteammessagesClientserverLogin.CMsgClientHello;
 import in.dragonbra.javasteam.protobufs.steamclient.SteammessagesClientserverLogin.CMsgClientHeartBeat;
+import in.dragonbra.javasteam.protobufs.steamclient.SteammessagesClientserverLogin.CMsgClientHello;
 import in.dragonbra.javasteam.protobufs.steamclient.SteammessagesClientserverLogin.CMsgClientLoggedOff;
 import in.dragonbra.javasteam.protobufs.steamclient.SteammessagesClientserverLogin.CMsgClientLogonResponse;
 import in.dragonbra.javasteam.steam.discovery.ServerQuality;
@@ -18,23 +18,21 @@ import in.dragonbra.javasteam.steam.discovery.ServerRecord;
 import in.dragonbra.javasteam.steam.discovery.SmartCMServerList;
 import in.dragonbra.javasteam.steam.steamclient.configuration.SteamConfiguration;
 import in.dragonbra.javasteam.types.SteamID;
-import in.dragonbra.javasteam.util.IDebugNetworkListener;
-import in.dragonbra.javasteam.util.MsgUtil;
-import in.dragonbra.javasteam.util.NetHookNetworkListener;
-import in.dragonbra.javasteam.util.Strings;
+import in.dragonbra.javasteam.util.*;
 import in.dragonbra.javasteam.util.event.EventArgs;
 import in.dragonbra.javasteam.util.event.EventHandler;
 import in.dragonbra.javasteam.util.event.ScheduledFunction;
 import in.dragonbra.javasteam.util.log.LogManager;
 import in.dragonbra.javasteam.util.log.Logger;
 import in.dragonbra.javasteam.util.stream.BinaryReader;
+import org.jetbrains.annotations.Nullable;
 
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
-import java.util.*;
+import java.util.EnumSet;
 import java.util.zip.GZIPInputStream;
 
 /**
@@ -47,14 +45,23 @@ public abstract class CMClient {
 
     private final SteamConfiguration configuration;
 
+    @Nullable
+    private InetAddress publicIP;
+
+    @Nullable
+    private String ipCountryCode;
+
     private boolean isConnected;
 
     private long sessionToken;
 
+    @Nullable
     private Integer cellID;
 
+    @Nullable
     private Integer sessionID;
 
+    @Nullable
     private SteamID steamID;
 
     private IDebugNetworkListener debugNetworkListener;
@@ -64,6 +71,7 @@ public abstract class CMClient {
     // connection lock around the setup and tear down of the connection task
     private final Object connectionLock = new Object();
 
+    @Nullable
     private Connection connection;
 
     private final ScheduledFunction heartBeatFunc;
@@ -88,7 +96,8 @@ public abstract class CMClient {
     private final EventHandler<DisconnectedEventArgs> disconnected = new EventHandler<>() {
         @Override
         public void handleEvent(Object sender, DisconnectedEventArgs e) {
-            logger.debug("EventHandler `disconnected` called");
+            logger.debug("EventHandler `disconnected` called. User Initiated: " + e.isUserInitiated() +
+                    ", Expected Disconnection: " + expectDisconnection);
 
             isConnected = false;
 
@@ -134,6 +143,14 @@ public abstract class CMClient {
     }
 
     /**
+     * Debugging only method:
+     * Do not use this directly.
+     */
+    public void setIsConnected(boolean value) {
+        isConnected = value;
+    }
+
+    /**
      * Connects this client to a Steam3 server. This begins the process of connecting and encrypting the data channel
      * between the client and the server. Results are returned asynchronously in a {@link in.dragonbra.javasteam.steam.steamclient.callbacks.ConnectedCallback ConnectedCallback}. If the
      * server that SteamKit attempts to connect to is down, a {@link in.dragonbra.javasteam.steam.steamclient.callbacks.DisconnectedCallback DisconnectedCallback} will be posted instead.
@@ -166,10 +183,18 @@ public abstract class CMClient {
                     cmServer = getServers().getNextServerCandidate(configuration.getProtocolTypes());
                 }
 
+                if (cmServer == null) {
+                    logger.error("No CM servers available to connect to");
+                    onClientDisconnected(false);
+                    return;
+                }
+
                 connection = createConnection(cmServer.getProtocolTypes());
                 connection.getNetMsgReceived().addEventHandler(netMsgReceived);
                 connection.getConnected().addEventHandler(connected);
                 connection.getDisconnected().addEventHandler(disconnected);
+                logger.debug(String.format("Connecting to %s with protocol %s, and with connection impl %s",
+                        cmServer.getEndpoint(), cmServer.getProtocolTypes(), connection.getClass().getSimpleName()));
                 connection.connect(cmServer.getEndpoint());
             } catch (Exception e) {
                 logger.debug("Failed to connect to Steam network", e);
@@ -293,15 +318,13 @@ public abstract class CMClient {
     }
 
     private Connection createConnection(EnumSet<ProtocolTypes> protocol) {
-        if (protocol.contains(ProtocolTypes.WEB_SOCKET)) {
-            return new WebSocketConnection();
-        } else if (protocol.contains(ProtocolTypes.TCP)) {
-            return new EnvelopeEncryptedConnection(new TcpConnection(), getUniverse());
-        } else if (protocol.contains(ProtocolTypes.UDP)) {
-            return new EnvelopeEncryptedConnection(new UdpConnection(), getUniverse());
+        IConnectionFactory connectionFactory = configuration.getConnectionFactory();
+        Connection connection = connectionFactory.createConnection(configuration, protocol);
+        if (connection == null) {
+            logger.error(String.format("Connection factory returned null connection for protocols %s", protocol));
+            throw new IllegalArgumentException("Connection factory returned null connection.");
         }
-
-        throw new IllegalArgumentException("Protocol bitmask has no supported protocols set.");
+        return connection;
     }
 
     public static IPacketMsg getPacketMsg(byte[] data) {
@@ -406,13 +429,20 @@ public abstract class CMClient {
             steamID = new SteamID(logonResp.getProtoHeader().getSteamid());
 
             cellID = logonResp.getBody().getCellId();
+            publicIP = NetHelpers.getIPAddress(logonResp.getBody().getPublicIp());
+            ipCountryCode = logonResp.getBody().getIpCountryCode();
 
             // restart heartbeat
             heartBeatFunc.stop();
             heartBeatFunc.setDelay(logonResp.getBody().getLegacyOutOfGameHeartbeatSeconds() * 1000L);
             heartBeatFunc.start();
         } else if (logonResponse == EResult.TryAnotherCM || logonResponse == EResult.ServiceUnavailable) {
-            getServers().tryMark(connection.getCurrentEndPoint(), connection.getProtocolTypes(), ServerQuality.BAD);
+            var connection = this.connection;
+            if (connection != null) {
+                getServers().tryMark(connection.getCurrentEndPoint(), connection.getProtocolTypes(), ServerQuality.BAD);
+            } else {
+                logger.error("Connection was null trying to mark endpoint bad.");
+            }
         }
     }
 
@@ -421,6 +451,8 @@ public abstract class CMClient {
         steamID = null;
 
         cellID = null;
+        publicIP = null;
+        ipCountryCode = null;
 
         heartBeatFunc.stop();
 
@@ -431,7 +463,12 @@ public abstract class CMClient {
             logger.debug("handleLoggedOff got " + logoffResult);
 
             if (logoffResult == EResult.TryAnotherCM || logoffResult == EResult.ServiceUnavailable) {
-                getServers().tryMark(connection.getCurrentEndPoint(), connection.getProtocolTypes(), ServerQuality.BAD);
+                var connection = this.connection;
+                if (connection != null) {
+                    getServers().tryMark(connection.getCurrentEndPoint(), connection.getProtocolTypes(), ServerQuality.BAD);
+                } else {
+                    logger.error("Connection was null trying to mark endpoint bad.");
+                }
             }
         } else {
             logger.debug("handleLoggedOff got unexpected response: " + packetMsg.getMsgType());
@@ -467,19 +504,47 @@ public abstract class CMClient {
     /**
      * Returns the local IP of this client.
      *
-     * @return The local IP.
+     * @return The local IP or null if no connection is available.
      */
-    public InetAddress getLocalIP() {
+    public @Nullable InetAddress getLocalIP() {
+        var connection = this.connection;
+        if (connection == null) {
+            return null;
+        }
         return connection.getLocalIP();
     }
 
     /**
      * Returns the current endpoint this client is connected to.
      *
-     * @return The current endpoint.
+     * @return The current endpoint or null if no connection is available.
      */
-    public InetSocketAddress getCurrentEndpoint() {
+    public @Nullable InetSocketAddress getCurrentEndpoint() {
+        var connection = this.connection;
+        if (connection == null) {
+            return null;
+        }
         return connection.getCurrentEndPoint();
+    }
+
+    /**
+     * Gets the public IP address of this client. This value is assigned after a logon attempt has succeeded.
+     * This value will be <c>null</c> if the client is logged off of Steam.
+     *
+     * @return The {@link InetSocketAddress} public ip
+     */
+    public @Nullable InetAddress getPublicIP() {
+        return publicIP;
+    }
+
+    /**
+     * Gets the country code of our public IP address according to Steam. This value is assigned after a logon attempt has succeeded.
+     * This value will be <c>null</c> if the client is logged off of Steam.
+     *
+     * @return the ip country code.
+     */
+    public @Nullable String getIpCountryCode() {
+        return ipCountryCode;
     }
 
     /**
@@ -522,7 +587,7 @@ public abstract class CMClient {
      * @return the Steam recommended Cell ID of this client. This value is assigned after a logon attempt has succeeded.
      * This value will be <b>null</b> if the client is logged off of Steam.
      */
-    public Integer getCellID() {
+    public @Nullable Integer getCellID() {
         return cellID;
     }
 
@@ -532,7 +597,7 @@ public abstract class CMClient {
      *
      * @return The session ID.
      */
-    public Integer getSessionID() {
+    public @Nullable Integer getSessionID() {
         return sessionID;
     }
 
@@ -542,7 +607,7 @@ public abstract class CMClient {
      *
      * @return The SteamID.
      */
-    public SteamID getSteamID() {
+    public @Nullable SteamID getSteamID() {
         return steamID;
     }
 

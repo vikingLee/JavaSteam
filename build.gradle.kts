@@ -1,4 +1,6 @@
 import org.gradle.api.tasks.testing.logging.TestLogEvent
+import org.gradle.kotlin.dsl.invoke
+import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 import org.jmailen.gradle.kotlinter.tasks.FormatTask
 import org.jmailen.gradle.kotlinter.tasks.LintTask
 
@@ -31,10 +33,17 @@ java {
     withSourcesJar()
 }
 
+kotlin {
+    compilerOptions {
+        jvmTarget.set(JvmTarget.fromTarget(libs.versions.java.get()))
+    }
+}
+
 /* Protobufs */
 protobuf.protoc {
     artifact = libs.protobuf.protoc.get().toString()
 }
+
 
 /* Testing */
 tasks.test {
@@ -102,6 +111,9 @@ sourceSets.main {
 tasks["lintKotlinMain"].dependsOn("formatKotlin")
 tasks["check"].dependsOn("jacocoTestReport")
 tasks["compileJava"].dependsOn("generateSteamLanguage", "generateProjectVersion", "generateRpcMethods")
+tasks["compileKotlin"].dependsOn("generateSteamLanguage", "generateProjectVersion", "generateRpcMethods")
+tasks["generateRpcMethods"].dependsOn("extractProto", "extractIncludeProto")
+
 // tasks["build"].finalizedBy("dokkaGenerate")
 
 /* Kotlinter */
@@ -113,6 +125,7 @@ tasks.withType<FormatTask> {
 }
 
 dependencies {
+    implementation(libs.bundles.ktor)
     implementation(libs.commons.io)
     implementation(libs.commons.lang3)
     implementation(libs.commons.validator)
@@ -120,17 +133,22 @@ dependencies {
     implementation(libs.kotlin.coroutines)
     implementation(libs.kotlin.stdib)
     implementation(libs.okHttp)
-    implementation(libs.xz)
     implementation(libs.protobuf.java)
-    implementation(libs.bundles.ktor)
+    implementation(libs.xz)
+    compileOnly(libs.zstd)
 
     testImplementation(libs.bundles.testing)
 }
 
 /* Artifact publishing */
 nexusPublishing {
+    // OSSRH reaches EOL on June 30, 2025
+    // https://central.sonatype.org/publish/publish-portal-ossrh-staging-api/#configuration
     repositories {
         sonatype {
+            nexusUrl.set(uri("https://ossrh-staging-api.central.sonatype.com/service/local/"))
+            snapshotRepositoryUrl.set(uri("https://central.sonatype.com/repository/maven-snapshots/"))
+
             val ossrhUsername: String by project
             val ossrhPassword: String by project
             username = ossrhUsername

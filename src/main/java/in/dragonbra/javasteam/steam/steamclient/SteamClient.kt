@@ -6,12 +6,14 @@ import `in`.dragonbra.javasteam.steam.CMClient
 import `in`.dragonbra.javasteam.steam.authentication.SteamAuthentication
 import `in`.dragonbra.javasteam.steam.handlers.ClientMsgHandler
 import `in`.dragonbra.javasteam.steam.handlers.steamapps.SteamApps
+import `in`.dragonbra.javasteam.steam.handlers.steamauthticket.SteamAuthTicket
 import `in`.dragonbra.javasteam.steam.handlers.steamcloud.SteamCloud
 import `in`.dragonbra.javasteam.steam.handlers.steamcontent.SteamContent
 import `in`.dragonbra.javasteam.steam.handlers.steamfriends.SteamFriends
 import `in`.dragonbra.javasteam.steam.handlers.steamgamecoordinator.SteamGameCoordinator
 import `in`.dragonbra.javasteam.steam.handlers.steamgameserver.SteamGameServer
 import `in`.dragonbra.javasteam.steam.handlers.steammasterserver.SteamMasterServer
+import `in`.dragonbra.javasteam.steam.handlers.steammatchmaking.SteamMatchmaking
 import `in`.dragonbra.javasteam.steam.handlers.steamnetworking.SteamNetworking
 import `in`.dragonbra.javasteam.steam.handlers.steamnotifications.SteamNotifications
 import `in`.dragonbra.javasteam.steam.handlers.steamscreenshots.SteamScreenshots
@@ -70,17 +72,19 @@ class SteamClient @JvmOverloads constructor(
         addHandlerCore(SteamFriends())
         addHandlerCore(SteamUser())
         addHandlerCore(SteamApps())
-        addHandlerCore(SteamContent())
         addHandlerCore(SteamGameCoordinator())
         addHandlerCore(SteamGameServer())
+        addHandlerCore(SteamUserStats())
         addHandlerCore(SteamMasterServer())
         addHandlerCore(SteamCloud())
         addHandlerCore(SteamWorkshop())
         addHandlerCore(SteamUnifiedMessages())
         addHandlerCore(SteamScreenshots())
+        addHandlerCore(SteamMatchmaking())
         addHandlerCore(SteamNetworking())
-        addHandlerCore(SteamNotifications())
-        addHandlerCore(SteamUserStats())
+        addHandlerCore(SteamContent())
+        addHandlerCore(SteamAuthTicket())
+        addHandlerCore(SteamNotifications()) // JavaSteam Addition
 
         if (handlers.size != HANDLERS_COUNT) {
             logger.error("Handlers size didnt match handlers count (${handlers.size}) when initializing")
@@ -204,6 +208,11 @@ class SteamClient @JvmOverloads constructor(
     }
 
     fun startJob(job: AsyncJob) {
+        if (!isConnected) {
+            job.setFailed(dueToRemoteFailure = true)
+            return
+        }
+
         jobManager.startJob(job)
     }
 //endregion
@@ -256,17 +265,19 @@ class SteamClient @JvmOverloads constructor(
     override fun onClientDisconnected(userInitiated: Boolean) {
         super.onClientDisconnected(userInitiated)
 
+        postCallback(DisconnectedCallback(userInitiated))
+
         // if we are disconnected, cancel all pending jobs
         jobManager.cancelPendingJobs()
 
         jobManager.setTimeoutsEnabled(false)
 
-        // clearHandlerCaches()
-
-        postCallback(DisconnectedCallback(userInitiated))
+        clearHandlerCaches()
     }
 
-    // fun clearHandlerCaches()
+    fun clearHandlerCaches() {
+        getHandler<SteamMatchmaking>()?.clearLobbyCache()
+    }
 
     private fun handleJobHeartbeat(packetMsg: IPacketMsg) {
         JobID(packetMsg.getTargetJobID()).let(jobManager::heartbeatJob)
@@ -279,6 +290,6 @@ class SteamClient @JvmOverloads constructor(
     companion object {
         private val logger: Logger = LogManager.getLogger(SteamClient::class.java)
 
-        private const val HANDLERS_COUNT = 14
+        private const val HANDLERS_COUNT = 16
     }
 }
